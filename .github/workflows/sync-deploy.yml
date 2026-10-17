@@ -1,0 +1,39 @@
+name: Sync Upstream & Deploy
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Sync upstream
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "bot@users.noreply.github.com"
+          git remote add upstream https://github.com/hunshcn/gh-proxy.git 2>/dev/null || true
+          git fetch upstream master
+          git checkout main
+          cp -r .github /tmp/dotgithub 2>/dev/null || true
+          git reset --hard upstream/master
+          cp -r /tmp/dotgithub .github 2>/dev/null || true
+          git add .github 2>/dev/null || true
+          git diff --cached --quiet || git commit -m "chore: sync upstream + restore workflow"
+          git push --force origin main
+
+      - name: Deploy to Cloudflare Workers
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+        run: |
+          echo 'name = "gh-proxy"' > wrangler.toml
+          echo 'main = "index.js"' >> wrangler.toml
+          echo 'compatibility_date = "2025-11-11"' >> wrangler.toml
+          npx wrangler deploy
