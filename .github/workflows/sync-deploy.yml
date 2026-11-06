@@ -5,6 +5,11 @@ on:
     - cron: '0 */6 * * *'
   workflow_dispatch:
 
+# 同一时间只跑一个同步，避免两次 force push 互相覆盖
+concurrency:
+  group: sync-upstream-deploy
+  cancel-in-progress: false
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
@@ -17,17 +22,42 @@ jobs:
 
       - name: Sync upstream
         run: |
+          set -euo pipefail
           git config user.name "github-actions[bot]"
-          git config user.email "bot@users.noreply.github.com"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git remote add upstream https://github.com/hunshcn/gh-proxy.git 2>/dev/null || true
-          git fetch upstream master
+          git fetch --no-tags upstream master
           git checkout main
+
+          # 备份本仓库自己的 .github（上游没有，需要保留工作流）
           cp -r .github /tmp/dotgithub 2>/dev/null || true
+
+          # 镜像上游代码
           git reset --hard upstream/master
           cp -r /tmp/dotgithub .github 2>/dev/null || true
-          git add .github 2>/dev/null || true
-          git diff --cached --quiet || git commit -m "chore: sync upstream + restore workflow"
-          git push --force origin main
+          git add -A
+
+          # 与远端 main 比较，没变化就不提交、不推送（避免每 6 小时产生空提交）
+          if git diff --quiet --cached origin/main; then
+            echo "上游无变化，跳过推送"
+          else
+            git commit -m "chore: sync upstream + restore workflow"
+            # GitHub 偶发返回 "fatal error in commit_refs_rules"（服务端 ref 规则校验内部错误），重试几次
+            pushed=0
+            for i in 1 2 3 4 5; do
+              if git push --force origin main; then
+                echo "推送成功（第 $i 次）"
+                pushed=1
+                break
+              fi
+              echo "推送失败（第 $i 次），$((i*10)) 秒后重试"
+              sleep $((i*10))
+            done
+            if [ "$pushed" -ne 1 ]; then
+              echo "::error::git push 重试 5 次仍失败"
+              exit 1
+            fi
+          fi
 
       - name: Deploy to Cloudflare Workers
         env:
